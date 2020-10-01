@@ -1,0 +1,457 @@
+Import Libraries
+# Import required libraries and settings
+
+import os
+import sys
+import time
+import numpy
+import pandas
+import torch
+import torchvision
+from sklearn.preprocessing import LabelBinarizer
+from sklearn.metrics import classification_report, confusion_matrix, roc_auc_score, roc_curve, auc
+from sklearn.pipeline import  make_pipeline
+import matplotlib
+import seaborn
+import barbar
+import warnings
+warnings.filterwarnings('ignore') # set warning to ignore
+
+# Get tensorboard
+from torch.utils.tensorboard import SummaryWriter
+writer = SummaryWriter()
+
+# set gpu if available
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+Load data
+# Load data
+
+## Root directory to images
+data_dir = 'data/Chest X-ray'
+# data_dir = 'data/Sample'
+torch.manual_seed(0)
+
+## Transform script
+### Set mean and standard deviation
+mean = [0.485, 0.456, 0.406]
+std = [0.229, 0.224, 0.225]
+
+### Transform function
+transform = torchvision.transforms.Compose([
+            torchvision.transforms.Resize((224,224)),
+            torchvision.transforms.ToTensor(), 
+            torchvision.transforms.Normalize(mean=mean, std=std)])
+
+
+## Transform and Load data in batches
+batch_size = 8
+train_data = torchvision.datasets.ImageFolder(root=os.path.join(data_dir, 'Train'), transform=transform)
+val_data = torchvision.datasets.ImageFolder(root=os.path.join(data_dir, 'Val'), transform=transform)
+test_data = torchvision.datasets.ImageFolder(root=os.path.join(data_dir, 'Test'), transform=transform)
+train_loader = torch.utils.data.DataLoader(train_data, batch_size=batch_size, shuffle=True)
+val_loader = torch.utils.data.DataLoader(val_data, batch_size=batch_size, shuffle=True)
+test_loader = torch.utils.data.DataLoader(test_data,  batch_size=batch_size, shuffle=True) # No batch splitting for testing data
+
+
+## Print data information
+print(f'No. of images in Train data: \t {len(train_data)}.')
+print(f'No. of images in Val data: \t {len(val_data)}.')
+print(f'No. of images in Test data: \t {len(test_data)}.')
+print(f'Binary Labels in Train data: \t {train_data.class_to_idx}.')
+print(f'Binary Labels in Val data: \t {val_data.class_to_idx}.')
+print(f'Binary Labels in Test data: \t {test_data.class_to_idx}.')
+No. of images in Train data: 	 4932.
+No. of images in Val data: 	 300.
+No. of images in Test data: 	 624.
+Binary Labels in Train data: 	 {'NORMAL': 0, 'PNEUMONIA': 1}.
+Binary Labels in Val data: 	 {'NORMAL': 0, 'PNEUMONIA': 1}.
+Binary Labels in Test data: 	 {'NORMAL': 0, 'PNEUMONIA': 1}.
+Build CNN Model
+# Design CNN Network
+
+## Define function
+class ConvolutionalNetwork(torch.nn.Module):
+
+    def __init__(self):
+        super().__init__()
+        self.conv1 = torch.nn.Conv2d(3, 64, 3)
+        self.pool = torch.nn.MaxPool2d(2, 2)
+        self.conv2 = torch.nn.Conv2d(64, 128, 3)
+        self.fc1 = torch.nn.Linear(128 * 54 * 54, 120)
+        self.fc2 = torch.nn.Linear(120, 84)
+        self.fc3 = torch.nn.Linear(84, 2)
+
+    def forward(self, x):
+        x = self.pool(torch.nn.functional.relu(self.conv1(x)))
+        x = self.pool(torch.nn.functional.relu(self.conv2(x)))
+        x = x.view(-1, 128 * 54 * 54)
+        x = torch.nn.functional.relu(self.fc1(x))
+        x = torch.nn.functional.relu(self.fc2(x))
+        x = self.fc3(x)
+        return torch.nn.functional.log_softmax(x, dim=1)
+    
+
+
+## Compile Model
+torch.manual_seed(0)
+model = ConvolutionalNetwork()
+model = model.to(device)
+
+
+## Loss function and Optimizer
+criterion = torch.nn.CrossEntropyLoss()
+optimizer = torch.optim.Adam(model.parameters(), lr=0.00001)
+# scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=7, gamma=0.1)
+
+# Send model graph to tensorboard
+inputs, labels = next(iter(train_loader))
+writer.add_graph(model, inputs.to(device))
+
+
+print('-'*150)
+## Print model summary
+print('Model Summary: \n', model)
+print()
+
+## Print number of trainable parameters
+print('No. of trainable parameters: ', sum(p.numel() for p in model.parameters() if p.requires_grad))
+print()
+
+## Print model's state_dict
+print("Model's state_dict:")
+for param_tensor in model.state_dict():
+    print(param_tensor, "\t", model.state_dict()[param_tensor].size())
+print()
+    
+
+## Print optimizer's state_dict
+print("Optimizer's state_dict:")
+for var_name in optimizer.state_dict():
+    print(var_name, "\t", optimizer.state_dict()[var_name])
+print('-'*150)
+print()
+print()
+------------------------------------------------------------------------------------------------------------------------------------------------------
+Model Summary: 
+ ConvolutionalNetwork(
+  (conv1): Conv2d(3, 64, kernel_size=(3, 3), stride=(1, 1))
+  (pool): MaxPool2d(kernel_size=2, stride=2, padding=0, dilation=1, ceil_mode=False)
+  (conv2): Conv2d(64, 128, kernel_size=(3, 3), stride=(1, 1))
+  (fc1): Linear(in_features=373248, out_features=120, bias=True)
+  (fc2): Linear(in_features=120, out_features=84, bias=True)
+  (fc3): Linear(in_features=84, out_features=2, bias=True)
+)
+
+No. of trainable parameters:  44875862
+
+Model's state_dict:
+conv1.weight 	 torch.Size([64, 3, 3, 3])
+conv1.bias 	 torch.Size([64])
+conv2.weight 	 torch.Size([128, 64, 3, 3])
+conv2.bias 	 torch.Size([128])
+fc1.weight 	 torch.Size([120, 373248])
+fc1.bias 	 torch.Size([120])
+fc2.weight 	 torch.Size([84, 120])
+fc2.bias 	 torch.Size([84])
+fc3.weight 	 torch.Size([2, 84])
+fc3.bias 	 torch.Size([2])
+
+Optimizer's state_dict:
+state 	 {}
+param_groups 	 [{'lr': 1e-05, 'betas': (0.9, 0.999), 'eps': 1e-08, 'weight_decay': 0, 'amsgrad': False, 'params': [1518951305848, 1518951305928, 1518951306008, 1518951306088, 1518951306168, 1518951306248, 1518951306328, 1518951306408, 1518951306488, 1518951306568]}]
+------------------------------------------------------------------------------------------------------------------------------------------------------
+
+
+Train and Evaluate Model
+# Train Model
+print("Train Model: ")
+print('-'*150)
+torch.manual_seed(0)  
+n_epochs = 10
+n_total_steps = len(train_loader)
+## Empty lists to store statistics
+train_losses = []
+val_losses = []
+train_correct = []
+val_correct = []
+trn_acc_list = []
+val_acc_list = []
+
+trn_running_loss = 0.0
+trn_running_correct = 0
+val_running_loss = 0
+val_running_correct = 0
+## Train model on pre-determined no. of epochs
+for i in range(n_epochs):
+    trn_corr = 0
+    val_corr = 0
+    
+    ### Run the training batches
+    for b, (X_train, y_train) in enumerate(barbar.Bar(train_loader)):
+     
+        X_train = X_train.to(device)
+        y_train = y_train.to(device)
+
+        #### Apply the model
+        y_pred = model(X_train)
+        loss = criterion(y_pred, y_train)
+
+        #### Tally the number of correct predictions
+        predicted = torch.max(y_pred.data, 1)[1]
+        batch_corr = (predicted == y_train).sum()
+        trn_corr += batch_corr
+
+        #### Update parameters
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+#         scheduler.step()
+           
+        
+    # writing data to tensorboard    
+    trn_running_loss += loss.item()
+    trn_running_correct += (predicted == y_train).sum().item()
+            
+    if (b+1) %1 == 0:
+        writer.add_scalar('Training Loss', trn_running_loss/2, i*n_total_steps+b)
+        writer.add_scalar('Training Acc', trn_running_correct/100, i*n_total_steps+b)
+        
+            
+    ### Update lists with training statistics
+    train_losses.append(loss)
+    train_correct.append(trn_corr)
+    train_acc = trn_corr*100/(len(train_data))
+    trn_acc_list.append(train_acc)  
+
+        
+ 
+        
+        
+    ### Run the validation batches
+    with torch.no_grad():
+        for b, (X_val, y_val) in enumerate(val_loader):
+            X_val = X_val.to(device)
+            y_val = y_val.to(device)
+
+            #### Apply the model
+            y_val_pred = model(X_val)
+
+            #### Tally the number of correct predictions
+            predicted = torch.max(y_val_pred.data, 1)[1] 
+            val_corr += (predicted == y_val).sum()
+                
+
+    ### Update lists with validation statistics
+    v_loss = criterion(y_val_pred, y_val)
+    val_losses.append(v_loss)
+    val_correct.append(val_corr)
+    val_acc = val_corr*100/(len(val_data))
+    val_acc_list.append(val_acc)
+        
+    # writing data to tensorboard   
+    val_running_loss += v_loss.item()
+    val_running_correct += (predicted == y_val).sum().item()
+            
+    if (b+1) % 100 == 0:
+        writer.add_scalar('Validation Loss', val_running_loss/100, i*n_total_steps+b)
+        writer.add_scalar('Validation Acc', val_running_correct/100, i*n_total_steps+b)
+
+
+    ### Print statistics
+    print(f'Epoch: {i+1}    Train Loss: {loss:.4f}    Train Correct: {trn_corr}    Train Acc: {train_acc}%    Val Loss: {v_loss:.4f}    Val Correct: {val_corr}    Val Acc: {val_acc}%')
+    print()
+
+
+  
+    
+print("Training and Validation Plots: ")
+    
+# Plot training results
+ ## Plot the loss function at the end of each epoch
+matplotlib.pyplot.plot(train_losses, label='training loss')
+matplotlib.pyplot.plot(val_losses, label='validation loss')
+matplotlib.pyplot.title('Loss at the end of each epoch')
+matplotlib.pyplot.legend()
+matplotlib.pyplot.show()
+
+
+## Plot the accuracy at the end of each epoch
+matplotlib.pyplot.plot(trn_acc_list, label='training accuracy')
+matplotlib.pyplot.plot(val_acc_list, label='validation accuracy')
+matplotlib.pyplot.title('Accuracy at the end of each epoch')
+matplotlib.pyplot.legend();
+matplotlib.pyplot.show()
+    
+print('-'*150)
+print()
+print()
+writer.close()
+Train Model: 
+------------------------------------------------------------------------------------------------------------------------------------------------------
+4932/4932: [===============================>] - ETA 0.2ss
+Epoch: 1    Train Loss: 0.0392    Train Correct: 4534    Train Acc: 91%    Val Loss: 0.0984    Val Correct: 269    Val Acc: 89%
+
+4932/4932: [===============================>] - ETA 0.1ss
+Epoch: 2    Train Loss: 0.0692    Train Correct: 4761    Train Acc: 96%    Val Loss: 0.1103    Val Correct: 263    Val Acc: 87%
+
+4932/4932: [===============================>] - ETA 0.1ss
+Epoch: 3    Train Loss: 0.3592    Train Correct: 4792    Train Acc: 97%    Val Loss: 0.0646    Val Correct: 274    Val Acc: 91%
+
+4932/4932: [===============================>] - ETA 0.1ss
+Epoch: 4    Train Loss: 0.1351    Train Correct: 4825    Train Acc: 97%    Val Loss: 0.1052    Val Correct: 263    Val Acc: 87%
+
+4932/4932: [===============================>] - ETA 0.2ss
+Epoch: 5    Train Loss: 0.3412    Train Correct: 4841    Train Acc: 98%    Val Loss: 0.4318    Val Correct: 269    Val Acc: 89%
+
+4932/4932: [===============================>] - ETA 0.1ss
+Epoch: 6    Train Loss: 0.0294    Train Correct: 4855    Train Acc: 98%    Val Loss: 0.0086    Val Correct: 279    Val Acc: 93%
+
+4932/4932: [===============================>] - ETA 0.1ss
+Epoch: 7    Train Loss: 0.0291    Train Correct: 4853    Train Acc: 98%    Val Loss: 0.0094    Val Correct: 263    Val Acc: 87%
+
+4932/4932: [===============================>] - ETA 0.1ss
+Epoch: 8    Train Loss: 0.0013    Train Correct: 4855    Train Acc: 98%    Val Loss: 0.0010    Val Correct: 274    Val Acc: 91%
+
+4932/4932: [===============================>] - ETA 0.1ss
+Epoch: 9    Train Loss: 0.0131    Train Correct: 4872    Train Acc: 98%    Val Loss: 0.0051    Val Correct: 270    Val Acc: 90%
+
+4932/4932: [===============================>] - ETA 0.2ss
+Epoch: 10    Train Loss: 0.0005    Train Correct: 4877    Train Acc: 98%    Val Loss: 0.3761    Val Correct: 271    Val Acc: 90%
+
+Training and Validation Plots: 
+
+
+------------------------------------------------------------------------------------------------------------------------------------------------------
+
+
+ ## Clear device memory before startings
+if device=='cuda':
+    torch.cuda.empty_cache() ## clear all memory before start
+    torch.cuda.reset_max_memory_allocated(device=device) ## Reset max memory
+Make Predictions
+print('Making Predictions from Model: ')
+print('-'*150)
+## Run evaluation
+torch.manual_seed(0)
+model.eval()
+test_loader_complete = torch.utils.data.DataLoader(test_data, batch_size=len(test_data), shuffle=False)
+with torch.no_grad():
+    correct = 0
+    for c, (X_test, y_test) in enumerate(barbar.Bar(test_loader_complete)):
+        X_test = X_test.to(device)
+        y_test = y_test.to(device)
+        y_val = model(X_test)
+        predicted = torch.max(y_val,1)[1]
+        correct += (predicted == y_test).sum()
+
+
+## Extracting statistics        
+y_test = y_test.view(-1).cpu()
+predicted = predicted.view(-1).cpu()
+
+
+## Printing statistics
+Test_total = len(test_data)
+Test_acc = correct*100/(len(test_data)) 
+print()
+print(f'Test Correct: {correct}/{Test_total}    Test Accuracy: {Test_acc:}%')
+print()
+print()
+
+## Plotting statistics
+### Classification report
+print(classification_report(y_pred=predicted, y_true=y_test, target_names=test_data.classes))
+print()
+print()
+
+### Heatmap of confusion matrix
+arr = confusion_matrix(y_test, predicted)
+df_cm = pandas.DataFrame(arr, test_data.classes, test_data.classes)
+matplotlib.pyplot.figure(figsize = (9,6))
+seaborn.heatmap(df_cm, annot=True, fmt="d", cmap='BuGn')
+matplotlib.pyplot.xlabel("Predicted Label")
+matplotlib.pyplot.ylabel("True Label")
+matplotlib.pyplot.title('Confusion Matrix')
+matplotlib.pyplot.show()
+    
+print('-'*150)
+print()
+print()
+Making Predictions from Model: 
+------------------------------------------------------------------------------------------------------------------------------------------------------
+624/624: [>...............................] - ETA 0.0s
+
+Test Correct: 466/624    Test Accuracy: 74%
+
+
+              precision    recall  f1-score   support
+
+      NORMAL       0.97      0.33      0.50       234
+   PNEUMONIA       0.71      0.99      0.83       390
+
+    accuracy                           0.75       624
+   macro avg       0.84      0.66      0.66       624
+weighted avg       0.81      0.75      0.71       624
+
+
+
+
+------------------------------------------------------------------------------------------------------------------------------------------------------
+
+
+# Roc curves
+
+## coverting tensors to numpy arrays
+y_test1 = y_test.numpy()
+y_score1 = predicted.numpy()
+lb = LabelBinarizer()
+y_test = lb.fit_transform(y_test1)
+y_test = numpy.hstack((y_test, 1 - y_test)) 
+y_score = lb.fit_transform(y_score1)
+y_score = numpy.hstack((y_score, 1 - y_score))
+
+
+# Compute ROC curve and ROC area for each class
+fpr = dict()
+tpr = dict()
+roc_auc = dict()
+for i in range(2):
+    fpr[i], tpr[i], _ = roc_curve(y_test[:, i], y_score[:, i])
+    roc_auc[i] = auc(fpr[i], tpr[i])
+    
+# Compute micro-average ROC curve and ROC area
+fpr["micro"], tpr["micro"], _ = roc_curve(y_test.ravel(), y_score.ravel())
+roc_auc["micro"] = auc(fpr["micro"], tpr["micro"])  
+
+# roc values for each class
+print('ROC curve area values for each class: ', roc_auc)
+
+# Roc for Pneumonia
+matplotlib.pyplot.figure()
+lw = 2
+matplotlib.pyplot.plot(fpr[1], tpr[1], color='darkorange',
+         lw=lw, label='ROC curve (area = %0.2f)' % roc_auc[1])
+matplotlib.pyplot.plot([0, 1], [0, 1], color='navy', lw=lw, linestyle='--')
+matplotlib.pyplot.xlim([0.0, 1.0])
+matplotlib.pyplot.ylim([0.0, 1.05])
+matplotlib.pyplot.xlabel('False Positive Rate')
+matplotlib.pyplot.ylabel('True Positive Rate')
+matplotlib.pyplot.title('ROC: Pneumonia')
+matplotlib.pyplot.legend(loc="lower right")
+matplotlib.pyplot.show()
+
+# Roc for Normal
+matplotlib.pyplot.figure()
+lw = 2
+matplotlib.pyplot.plot(fpr[0], tpr[0], color='darkorange',
+         lw=lw, label='ROC curve (area = %0.2f)' % roc_auc[0])
+matplotlib.pyplot.plot([0, 1], [0, 1], color='navy', lw=lw, linestyle='--')
+matplotlib.pyplot.xlim([0.0, 1.0])
+matplotlib.pyplot.ylim([0.0, 1.05])
+matplotlib.pyplot.xlabel('False Positive Rate')
+matplotlib.pyplot.ylabel('True Positive Rate')
+matplotlib.pyplot.title('ROC: Normal')
+matplotlib.pyplot.legend(loc="lower right")
+matplotlib.pyplot.show()
+ROC curve area values for each class:  {0: 0.6641025641025642, 1: 0.6641025641025641, 'micro': 0.7467948717948718}
+
